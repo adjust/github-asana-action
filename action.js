@@ -72,7 +72,7 @@ async function action() {
     const pullRequests = await githubClient.repos.listPullRequestsAssociatedWithCommit({
       owner: github.context.repo.owner,
       repo: github.context.repo.repo,
-      commit_sha: getInput('sha') || github.context.sha,
+      commit_sha: core.getInput('sha') || github.context.sha,
     });
 
     PULL_REQUEST = pullRequests.data.length > 0 && pullRequests.data[0];
