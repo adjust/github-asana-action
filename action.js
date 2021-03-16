@@ -2,8 +2,8 @@ const core = require('@actions/core');
 const github = require('@actions/github');
 const asana = require('asana');
 
-async function moveSection(client, taskId, targets) {
-  const task = await client.tasks.findById(taskId);
+async function moveSection(asanaClient, taskId, targets) {
+  const task = await asanaClient.tasks.findById(taskId);
 
   targets.forEach(async target => {
     const targetProject = task.projects.find(project => project.name === target.project);
@@ -11,10 +11,10 @@ async function moveSection(client, taskId, targets) {
       core.info(`This task does not exist in "${target.project}" project`);
       return;
     }
-    let targetSection = await client.sections.findByProject(targetProject.gid)
+    let targetSection = await asanaClient.sections.findByProject(targetProject.gid)
       .then(sections => sections.find(section => section.name === target.section));
     if (targetSection) {
-      await client.sections.addTask(targetSection.gid, { task: taskId });
+      await asanaClient.sections.addTask(targetSection.gid, { task: taskId });
       core.info(`Moved to: ${target.project}/${target.section}`);
     } else {
       core.error(`Asana section ${target.section} not found.`);
@@ -22,10 +22,10 @@ async function moveSection(client, taskId, targets) {
   });
 }
 
-async function findComment(client, taskId, commentId) {
+async function findComment(asanaClient, taskId, commentId) {
   let stories;
   try {
-    const storiesCollection = await client.tasks.stories(taskId);
+    const storiesCollection = await asanaClient.tasks.stories(taskId);
     stories = await storiesCollection.fetch(200);
   } catch (error) {
     throw error;
@@ -34,9 +34,9 @@ async function findComment(client, taskId, commentId) {
   return stories.find(story => story.text.indexOf(commentId) !== -1);
 }
 
-async function addComment(client, taskId, text, isPinned) {
+async function addComment(asanaClient, taskId, text, isPinned) {
   try {
-    const comment = await client.tasks.addComment(taskId, {
+    const comment = await asanaClient.tasks.addComment(taskId, {
       text: text,
       is_pinned: isPinned,
     });
@@ -46,7 +46,7 @@ async function addComment(client, taskId, text, isPinned) {
   }
 }
 
-async function buildClient(asanaPAT) {
+async function buildAsanaClient(asanaPAT) {
   return asana.Client.create({
     defaultHeaders: { 'asana-enable': 'new-sections,string_ids' },
     logAsanaChangeWarnings: false
@@ -54,18 +54,28 @@ async function buildClient(asanaPAT) {
 }
 
 async function action() {
-  const
-    ASANA_PAT = process.env.ASANA_TOKEN,
-    ACTION = core.getInput('action', {required: true}),
-    TRIGGER_PHRASE = core.getInput('trigger-phrase') || '',
-    PULL_REQUEST = github.context.payload.pull_request,
-    REGEX_STRING = `${TRIGGER_PHRASE}(?:\s*)https:\\/\\/app.asana.com\\/(\\d+)\\/(?<project>\\d+)\\/(?<task>\\d+)`,
-    REGEX = new RegExp(REGEX_STRING,'g')
+  const ACTION = core.getInput('action', {required: true})
+  const TRIGGER_PHRASE = core.getInput('trigger-phrase') || ''
+  const REGEX_STRING = `${TRIGGER_PHRASE}(?:\s*)https:\\/\\/app.asana.com\\/(\\d+)\\/(?<project>\\d+)\\/(?<task>\\d+)`
+  const REGEX = new RegExp(REGEX_STRING,'g')
   ;
 
-  const client = await buildClient(ASANA_PAT);
-  if(client === null){
-    throw new Error('client authorization failed');
+  const asanaClient = await buildAsanaClient(process.env.ASANA_TOKEN);
+  if(asanaClient === null){
+    throw new Error('asanaClient authorization failed');
+  }
+
+  const githubClient = new github.GitHub(process.env.GITHUB_TOKEN, {});
+
+  let PULL_REQUEST = github.context.payload.pull_request
+  if(!PULL_REQUEST) {
+    const pullRequests = await githubClient.repos.listPullRequestsAssociatedWithCommit({
+      owner: github.context.repo.owner,
+      repo: github.context.repo.repo,
+      commit_sha: getInput('sha') || github.context.sha,
+    });
+
+    PULL_REQUEST = pullRequests.data.length > 0 && pullRequests.data[0];
   }
 
   console.info('looking in body', PULL_REQUEST.body, 'regex', REGEX_STRING);
@@ -83,12 +93,10 @@ async function action() {
   console.info('calling', ACTION);
   switch(ACTION){
     case 'assert-link': {
-      const githubToken = core.getInput('github-token', {required: true});
       const linkRequired = core.getInput('link-required', {required: true}) === 'true';
-      const octokit = new github.GitHub(githubToken);
       const statusState = (!linkRequired || foundAsanaTasks.length > 0) ? 'success' : 'error';
       core.info(`setting ${statusState} for ${github.context.payload.pull_request.head.sha}`);
-      octokit.repos.createStatus({
+      githubClient.repos.createStatus({
         ...github.context.repo,
         'context': 'asana-link-presence',
         'state': statusState,
@@ -102,12 +110,12 @@ async function action() {
       const isPinned = core.getInput('is-pinned') === 'true';
       const comments = [];
       for(const taskId of foundAsanaTasks) {
-        let comment = await findComment(client, taskId, htmlText);
+        let comment = await findComment(asanaClient, taskId, htmlText);
         if(comment){
           console.info('found existing comment', comment.gid);
           continue;
         }
-        comment = await addComment(client, taskId, htmlText, isPinned);
+        comment = await addComment(asanaClient, taskId, htmlText, isPinned);
         comments.push(comment);
       };
       return comments;
@@ -116,11 +124,11 @@ async function action() {
       const commentId = core.getInput('comment-id', {required: true});
       const removedCommentIds = [];
       for(const taskId of foundAsanaTasks) {
-        const comment = await findComment(client, taskId, commentId);
+        const comment = await findComment(asanaClient, taskId, commentId);
         if(comment){
           console.info("removing comment", comment.gid);
           try {
-            await client.stories.delete(comment.gid);
+            await asanaClient.stories.delete(comment.gid);
           } catch (error) {
             console.error('rejecting promise', error);
           }
@@ -135,7 +143,7 @@ async function action() {
       for(const taskId of foundAsanaTasks) {
         console.info("marking task", taskId, isComplete ? 'complete' : 'incomplete');
         try {
-          await client.tasks.update(taskId, {
+          await asanaClient.tasks.update(taskId, {
             completed: isComplete
           });
         } catch (error) {
@@ -150,7 +158,7 @@ async function action() {
       const targets = JSON.parse(targetJSON);
       const movedTasks = [];
       for(const taskId of foundAsanaTasks) {
-        await moveSection(client, taskId, targets);
+        await moveSection(asanaClient, taskId, targets);
         movedTasks.push(taskId);
       }
       return movedTasks;
@@ -163,5 +171,5 @@ async function action() {
 module.exports = {
   action,
   default: action,
-  buildClient: buildClient
+  buildAsanaClient: buildAsanaClient
 };
