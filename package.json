@@ -24,7 +24,8 @@
   "dependencies": {
     "@actions/core": "^1.2.0",
     "@actions/github": "^1.1.0",
-    "asana": "^0.17.3"
+    "asana": "^0.17.3",
+    "npm-check-updates": "^16.6.3"
   },
   "devDependencies": {
     "jest": "^26.0.1"
